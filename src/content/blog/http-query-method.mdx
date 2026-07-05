@@ -1,0 +1,205 @@
+---
+title: "Introducing HTTP QUERY: A Better Read Contract"
+description: "A practical introduction to the new HTTP QUERY method, why GET and POST fall short, and how it helps agentic systems."
+author: "Arnav"
+pubDate: "2026-07-05"
+tags:
+  - http
+  - api-design
+  - architecture
+  - protocols
+  - mcp
+  - tools
+draft: false
+---
+
+HTTP QUERY is useful because it solves a design problem.
+
+The problem is simple to describe: as soon as a read request becomes part of the real business logic, the shape of the request starts to matter as much as the data it returns. At that point, the old HTTP choices begin to strain.
+
+When an application only needs a simple filter, GET works well. But once the request needs nested conditions, ranking, policy rules, and pagination state, the old approach starts to strain. Teams usually end up choosing between two imperfect options:
+
+1. Keep stretching GET query strings until they become hard to read and hard to maintain.
+2. Use POST for a read operation and accept that the method now looks like it may change state.
+
+QUERY was created to solve that exact gap.
+
+## The design problem
+
+The problem is not that GET or POST are bad methods. The problem is that they are both a poor fit for structured retrieval once the request becomes part of the business logic.
+
+GET is a good fit when the request is small and easy to express in the URL. It becomes awkward when the request needs nested filters, ranking weights, or multiple policy constraints. At that point, the URL stops looking like a clean interface and starts looking like a custom encoding format.
+
+POST has the opposite problem. It handles complex payloads well, but many systems treat POST as a write-capable method by default. That means infrastructure often assumes retry limits, logging rules, cache behavior, and policy behavior that are better suited to mutation than retrieval.
+
+So the original design problem was simple: the request needed to be expressive, but the method still needed to tell the truth about the operation.
+
+| Option | What it gives you | Main problem |
+| --- | --- | --- |
+| GET with a long query string | Safe reads with broad support | Hard to represent complex criteria cleanly |
+| GET with a body | Structured payload in theory | Inconsistent support and confusing semantics |
+| POST for search | Easy request shape | Looks like a write in many systems |
+| QUERY | Structured read with clear intent | Newer method, so adoption depends on stack support |
+
+## Why GET with a body is not a good default
+
+This comes up often because people notice that some HTTP stacks will technically accept a body on GET. The problem is not whether a body can be attached. The problem is whether the rest of the system will treat it consistently.
+
+GET with a body is not widely appreciated because it sits in a gray area:
+
+- many clients, servers, and proxies do not handle it consistently
+- cache behavior becomes harder to reason about
+- tooling and middleware often ignore the body for GET
+- the request becomes harder to debug because the method and payload do not line up with the usual expectations
+
+In practice, that means a GET body can create more confusion than value. The request still looks like a safe read, but the data you care about is hidden in a place that many systems are not designed to interpret.
+
+That is why teams usually avoid it. If the request needs a real body, a method that clearly supports structured retrieval is a cleaner fit.
+
+| Topic | GET | POST | QUERY |
+| --- | --- | --- | --- |
+| Semantics | Read-only | Often write-oriented | Read-only |
+| Body usage | Not a reliable default | Native | Native |
+| Infrastructure expectation | Safe read | May mutate state | Safe read with body |
+| Best fit | Simple filters | Actions or mixed work | Complex retrieval |
+| Risk | URL becomes too dense | Ambiguous intent | Depends on adoption and platform support |
+
+## How QUERY solves it
+
+QUERY gives you a request body for a read operation without making the endpoint look like a write.
+
+That matters because the method is what the platform understands. Gateways, proxies, auth layers, telemetry pipelines, and retry rules all key off the method. A body field can explain intent to your application code, but it does not carry the same weight in the rest of the stack.
+
+With QUERY, the request can say, clearly:
+
+- this is a read
+- the criteria are structured
+- the request may need ranking, filtering, and policy controls
+- the result should be safe to repeat
+
+That is the real fix. The body handles the complexity. The method handles the contract.
+
+## A simple example
+
+```http
+QUERY /retrieval/search HTTP/1.1
+Host: api.internal.example
+Content-Type: application/json
+
+{
+  "query": "snapshot isolation vs serializable",
+  "sources": ["rfc", "runbook", "postmortem"],
+  "filters": {
+    "language": ["en"],
+    "visibility": "internal",
+    "publishedAfter": "2021-01-01"
+  },
+  "ranking": {
+    "strategy": "hybrid",
+    "weights": {
+      "semantic": 0.75,
+      "keyword": 0.25
+    }
+  },
+  "limits": {
+    "maxDocs": 12,
+    "timeoutMs": 1000
+  }
+}
+```
+
+This is much easier to read than a long query string, and it is much less ambiguous than using POST for a search endpoint.
+
+It also avoids the uncertainty that comes with GET bodies, where the request may be accepted by one layer and ignored by another.
+
+## Why QUERY needed to be a new method
+
+The reason QUERY needed to be a new method is that method semantics matter outside the application.
+
+If the system sees GET, it expects safe retrieval with limited request shape. If it sees POST, it often assumes the request may mutate state. QUERY fills the space in between: it is safe like GET, but expressive like POST.
+
+That gives you a cleaner fit for infrastructure behavior:
+
+- caching can be reasoned about more clearly
+- retries can be handled more safely
+- logging and audit trails are easier to interpret
+- policy checks can stay aligned with the actual intent
+
+This is why QUERY is not just a different payload format. It is a clearer protocol signal.
+
+The result is a request shape that fits the job instead of forcing the job to fit the request shape.
+
+| Layer | GET | POST | QUERY |
+| --- | --- | --- | --- |
+| Gateway | Usually treated as cacheable read traffic | Usually treated as mutation-capable traffic | Can be handled as safe retrieval |
+| Retry policy | Often safe to retry | Often handled carefully | Safe to retry if the operation is idempotent by contract |
+| Logging / audit | Usually read-oriented | Usually write-oriented | Read-oriented with richer criteria |
+| Tooling | Best for simple calls | Best for commands and actions | Best for structured context fetches |
+
+## What this changes for engineers
+
+QUERY does not remove the need for good API design. It just makes good design easier to enforce.
+
+You still need to:
+
+- block writes in QUERY handlers
+- keep retrieval logic side-effect free
+- normalize criteria before caching or tracing
+- inject tenant and policy constraints on the server
+
+That last point matters. QUERY does not mean the client gets to define everything. The server still owns policy, limits, visibility, and compliance rules.
+
+The benefit is that these rules now sit on top of a method that already matches the intent of the operation.
+
+In other words, QUERY does not replace engineering discipline. It reduces the amount of accidental complexity around it.
+
+It also makes common implementation decisions easier:
+
+- search services can use structured request parsing instead of custom query-string grammars
+- clients can send richer criteria without inventing encoding rules
+- tests can assert that the request is read-only by contract
+- observability can tag the operation as a safe retrieval path
+
+## Why it helps agentic systems
+
+QUERY is especially useful in agentic systems and MCP-style workflows because those systems depend on a clean split between reading and acting.
+
+An agent often needs to gather context before it chooses the next action. If retrieval is a safe, explicit read path, the planner can ask for context without accidentally blurring into a state change.
+
+That helps in a few practical ways:
+
+- retrieval tools stay clearly read-only
+- action tools stay clearly mutating
+- planning loops become easier to control
+- retries are less risky
+- tool routers can treat context fetches differently from actions
+
+In simple terms, QUERY makes it easier for an agent to ask for information without creating confusion about whether it is doing work or changing state.
+
+That matters because agentic systems often chain multiple retrievals before taking an action. If each retrieval is clearly read-only, the planner can repeat or retry those calls without risking side effects.
+
+It also helps tool routing. A system can separate:
+
+- retrieval tools for context gathering
+- action tools for state changes
+- policy tools for enforcement and validation
+
+That separation keeps the agent loop simpler, safer, and easier to observe.
+
+## When not to use QUERY
+
+QUERY is not a replacement for GET.
+
+If the request is simple, GET is still the better choice. If the operation changes state, QUERY is the wrong method. QUERY is only for one category of work: structured reads that need stronger semantics than GET and clearer semantics than POST.
+
+That narrowness is a strength, not a weakness. It keeps the contract clear.
+
+## Final takeaway
+
+HTTP QUERY exists because complex reads need a method that says what the request really is.
+
+This is why the article is really about design: how to make a request shape, a method choice, and a system contract line up cleanly.
+
+GET is fine for simple filters. POST is fine for work that changes state. QUERY is for the middle ground: structured retrieval that should stay safe, readable, and easy to govern.
+
+For engineering teams, the main value is clarity. For agentic systems, the value is even stronger: retrieval stays retrieval, action stays action, and the platform can tell the difference.
